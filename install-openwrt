@@ -1,0 +1,151 @@
+#!/bin/bash
+# Define colors
+ORANGE='\033[0;33m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+# Change to directory that the script is stored in
+cd "$(dirname "$0")" &> /dev/null
+
+# Install Ubiquiti firmware v.8.5.3
+pingSuccess=0
+printf "\n${ORANGE}Please put Litebeam in TFTP reset mode.${NC}\nWaiting for device on 192.168.1.20..."
+while (($pingSuccess == 0))
+do
+        if ping -c 1 -w 2 192.168.1.20 &> /dev/null
+        then
+                printf "${GREEN}done.${NC}"
+                pingSuccess=1
+        else
+                echo -n "."
+        fi
+done
+
+# Change directory for tftp
+cd firmware &> /dev/null
+
+# Send firmware over tftp
+printf "\nInstalling Ubiquiti firmware version 8.5.3..."
+tftp 192.168.1.20 <<'ENDTFTP'
+bin
+trace
+put ubnt.bin
+quit
+ENDTFTP
+
+# Change back to source dir
+cd .. &> /dev/null
+
+# Wait for device to be ready to flash OpenWRT
+pingSuccess=0
+printf "${GREEN}done.${NC}\n\n${ORANGE}Continuing with OpenWRT installation.${NC}\nWaiting for device on 192.168.1.20..."
+while (($pingSuccess == 0))
+do
+        if ping -c 1 -w 3 192.168.1.20 &> /dev/null
+        then
+                printf "${GREEN}done.${NC}"
+                pingSuccess=1
+        else
+                echo -n "."
+        fi
+done
+
+# Delete items if they already exist on target device
+printf "\nDeleting pre-existing flashing files..."
+sshpass -p "ubnt" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubnt@192.168.1.20<<'ENDSSH' &> /dev/null
+rm -rf /tmp/firmware
+exit
+ENDSSH
+
+# Copy firmware files
+printf "${GREEN}done.${NC}\nCopying firmware files..."
+
+sshpass -p "ubnt" ssh -t -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubnt@192.168.1.20 "ls -l /tmp/firmware" 2>&1 | grep 8481089 -q &>/dev/null
+while test $? -gt 0 # verify files actually copy
+do
+        sshpass -p "ubnt" scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r firmware ubnt@192.168.1.20:/tmp &> /dev/null
+	if [[ "$try" = "1" ]]; then
+		printf "trying again..."
+		sleep 2
+	fi
+	try=2
+	sshpass -p "ubnt" ssh -t -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubnt@192.168.1.20 "ls -l /tmp/firmware" 2>&1 | grep 8481089 -q &>/dev/null
+done
+
+# Do OpenWRT flash
+printf "${GREEN}done.${NC}\nFlashing OpenWRT..."
+sshpass -p "ubnt" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubnt@192.168.1.20<<'ENDSSH' &> /dev/null
+fwupdate.real -m /tmp/firmware/ubnt.bin -d & sleep 3s ; kill $!  #Start real update and kill it
+dd if=/tmp/firmware/mtdblock2 of=/dev/mtdblock2
+dd if=/tmp/firmware/mtdblock3 of=/dev/mtdblock3
+reboot
+ENDSSH
+
+# Wait for ping on OpenWRT
+printf "${GREEN}done.${NC}\nWaiting for device on 192.168.1.1..."
+pingSuccess=0
+while (($pingSuccess == 0))
+do
+        if ping -c 1 -w 2 192.168.1.1 &> /dev/null
+        then
+                printf "${GREEN}done.${NC}"
+                pingSuccess=1
+        else
+                echo -n "."
+        fi
+done
+
+# Wait for OpenWrt to finish booting
+printf "\nWaiting for SSH service to start..."
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.1.1 "exit" &> /dev/null #Keep trying ssh
+while test $? -gt 0
+do
+	sleep 1
+	printf "."
+	ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.1.1 "exit" &> /dev/null
+done
+
+# Clean flash OpenWrt properly
+printf "${GREEN}done.${NC}\nCleanly re-flashing OpenWrt..."
+scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q openwrt/openwrt-sysupgrade.bin root@192.168.1.1:/tmp
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.1.1<<'ENDSSH' &> /dev/null
+sysupgrade -v -n /tmp/openwrt-sysupgrade.bin
+reboot
+ENDSSH
+
+# Wait for ping on OpenWRT
+printf "${GREEN}done.${NC}\nWaiting for device on 192.168.1.1..."
+pingSuccess=0
+while (($pingSuccess == 0))
+do
+        if ping -c 1 -w 2 192.168.1.1 &> /dev/null
+        then
+                printf "${GREEN}done.${NC}"
+                pingSuccess=1
+        else
+                echo -n "."
+        fi
+done
+
+# Wait for OpenWrt to finish booting
+printf "\nWaiting for SSH service to start..."
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.1.1 "exit" &> /dev/null #Keep trying ssh
+while test $? -gt 0
+do
+	sleep 1
+	printf "."
+	ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.1.1 "exit" &> /dev/null
+done
+
+# Install OpenWrt default config
+printf "${GREEN}done.${NC}\nInstalling OpenWrt default configuration..."
+scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -q backup*.tar.gz root@192.168.1.1:/tmp
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.1.1<<'ENDSSH' &> /dev/null
+sysupgrade -r /tmp/backup*.tar.gz
+sleep 1
+wifi reload
+exit
+ENDSSH
+
+# Done message
+printf "${GREEN}done.${NC}\n\n${GREEN}Device flashed successfully!${NC} Login at http://192.168.1.1\n"
